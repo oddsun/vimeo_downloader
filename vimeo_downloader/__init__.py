@@ -20,7 +20,7 @@ Usage:
     $ best_stream.download(download_directory='DirectoryName',filename='FileName')
     # For private or embed only videos
     $ v = Vimeo('https://player.vimeo.com/video/498617513',
-                  embedded_on='https://atpstar.com/plans-162.html') 
+                  embedded_on='https://atpstar.com/plans-162.html')
 """
 
 import os
@@ -35,7 +35,9 @@ headers = {
     "User-Agent": "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:84.0) Gecko/20100101 Firefox/84.0",
 }
 config = "https://player.vimeo.com/video/{}/config"
-details = "http://vimeo.com/api/v2/video/{}.json"
+# details = "http://vimeo.com/api/v2/video/{}.json"
+details = "http://api.vimeo.com/videos/{}"  # new api
+details_with_hash = "http://api.vimeo.com/videos/{}:{}"  # new api
 
 
 class URLNotSupported(Exception):
@@ -176,11 +178,17 @@ class Vimeo:
             cookies: Optional[str] = None,
     ):
         self._url = url  # URL for the vimeo video
-        self._video_id = self._validate_url()  # Video ID at the end of the link
-        self._headers = headers
+        self._video_id, self._video_hash = self._validate_url()  # Video ID at the end of the link
+        self._jwt = self._get_jwt()
+        self._headers = headers.copy()
+        self._headers_w_auth = self._headers | {'Authorization': f'jwt {self._jwt}'}
         self._cookies = dict(cookies_are=cookies)
         if embedded_on:
             self._headers["Referer"] = embedded_on
+
+    def _get_jwt(self):
+        r = requests.get('https://vimeo.com/_rv/viewer')
+        return r.json()['jwt']
 
     def _validate_url(self):
         """
@@ -191,12 +199,19 @@ class Vimeo:
             r"^https:\/\/player.vimeo.com\/video\/(\d+)$",
             r"^https:\/\/vimeo.com\/(\d+)$",
             r"^https://vimeo.com/groups/.+?/videos/(\d+)$",
+            r"^https://vimeo.com/(\d+)/(.+?)$",
             r"^https://vimeo.com/manage/videos/(\d+)$"
         ]
         for pattern in accepted_pattern:
             match = re.findall(pattern, self._url)
             if match:
-                return match[0]
+                result = match[0]
+
+                # in case there is no video hash
+                if isinstance(result, str):
+                    result = (result, None)
+
+                return result
         # If none of the patterns is matched exception is raised
         raise URLNotSupported(
             f"{self._url} is not supported. Make sure you don't include query parameters in the url"
@@ -206,9 +221,10 @@ class Vimeo:
         """
         Extracts the direct mp4 link for the vimeo video
         """
+        url = self._get_meta_data()['embed_player_config_url']
         if self._cookies:
             js_url = requests.get(
-                config.format(self._video_id),
+                url,
                 headers=self._headers,
                 cookies=self._cookies,
             )
@@ -263,10 +279,11 @@ class Vimeo:
         """
         Retrieves meta data for the video
         """
+        temp_details = details_with_hash.format(self._video_id, self._video_hash) if self._video_hash else details(self._video_id)
         if self._cookies:
-            video_info = requests.get(details.format(self._video_id), headers=self._headers, cookies=self._cookies)
+            video_info = requests.get(temp_details, headers=self._headers_w_auth, cookies=self._cookies)
         else:
-            video_info = requests.get(details.format(self._video_id), headers=self._headers)
+            video_info = requests.get(temp_details, headers=self._headers_w_auth)
         if not video_info.ok:
             raise RequestError(
                 f"{video_info.status_code}: Unable to retrieve meta data."
@@ -277,30 +294,30 @@ class Vimeo:
             raise RequestError(f"Couldn't retrieve meta data: {e}")
         return video_info
 
-    @property
-    def metadata(self) -> Metadata:
-        """
-        Fetch metadata and return it in form of namedtuple.
-        """
-
-        self._meta_data = self._get_meta_data()[0]
-        if "stats_number_of_likes" in self._meta_data.keys():
-            self._meta_data["likes"] = self._meta_data.pop("stats_number_of_likes")
-        if "stats_number_of_plays" in self._meta_data.keys():
-            self._meta_data["views"] = self._meta_data.pop("stats_number_of_plays")
-        if "stats_number_of_comments" in self._meta_data.keys():
-            self._meta_data["number_of_comments"] = self._meta_data.pop(
-                "stats_number_of_comments"
-            )
-
-        # If the Vimeo API returns with some unexpected fields, in some cases
-        # a regular namedtuple will be returned
-        try:
-            metadata = Metadata(**self._meta_data)
-            return metadata
-        except TypeError:
-            metadata = namedtuple("Metadata", self._meta_data.keys())
-        return metadata(**self._meta_data)
+    # @property
+    # def metadata(self) -> Metadata:
+    #     """
+    #     Fetch metadata and return it in form of namedtuple.
+    #     """
+    #
+    #     self._meta_data = self._get_meta_data()[0]
+    #     if "stats_number_of_likes" in self._meta_data.keys():
+    #         self._meta_data["likes"] = self._meta_data.pop("stats_number_of_likes")
+    #     if "stats_number_of_plays" in self._meta_data.keys():
+    #         self._meta_data["views"] = self._meta_data.pop("stats_number_of_plays")
+    #     if "stats_number_of_comments" in self._meta_data.keys():
+    #         self._meta_data["number_of_comments"] = self._meta_data.pop(
+    #             "stats_number_of_comments"
+    #         )
+    #
+    #     # If the Vimeo API returns with some unexpected fields, in some cases
+    #     # a regular namedtuple will be returned
+    #     try:
+    #         metadata = Metadata(**self._meta_data)
+    #         return metadata
+    #     except TypeError:
+    #         metadata = namedtuple("Metadata", self._meta_data.keys())
+    #     return metadata(**self._meta_data)
 
     @property
     def streams(self) -> List[_Stream]:
