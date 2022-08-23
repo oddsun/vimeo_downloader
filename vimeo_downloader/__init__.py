@@ -22,11 +22,11 @@ Usage:
     $ v = Vimeo('https://player.vimeo.com/video/498617513',
                   embedded_on='https://atpstar.com/plans-162.html') 
 """
-
 import os
 import re
 from collections import namedtuple
 from typing import List, NamedTuple, Optional
+from urllib.parse import parse_qs, urlparse
 
 import requests
 from tqdm import tqdm
@@ -108,7 +108,7 @@ class _Stream:
         return self._quality
 
     def download(
-            self, download_directory: str = "", filename: str = None, mute: bool = False
+        self, download_directory: str = "", filename: str = None, mute: bool = False
     ):
         """
         Downloads the video with progress bar if `mute=False`
@@ -140,10 +140,10 @@ class _Stream:
             chunk_size = 1024
             if not mute:
                 for chunk in tqdm(
-                        iterable=r.iter_content(chunk_size=chunk_size),
-                        total=total_length // chunk_size,
-                        unit="KB",
-                        desc=filename,
+                    iterable=r.iter_content(chunk_size=chunk_size),
+                    total=total_length // chunk_size,
+                    unit="KB",
+                    desc=filename,
                 ):
                     if chunk:
                         f.write(chunk)
@@ -153,6 +153,7 @@ class _Stream:
                     if chunk:
                         f.write(chunk)
                         f.flush()
+        return dp  # it is essential for file response.
 
     @property
     def filesize(self) -> str:
@@ -161,7 +162,7 @@ class _Stream:
         """
 
         r = requests.get(self._direct_url, stream=True, headers=headers)
-        return str(int(r.headers.get("content-length")) / 10 ** 6) + " MB"
+        return str(int(r.headers.get("content-length")) / 10**6) + " MB"
 
 
 class Vimeo:
@@ -170,59 +171,76 @@ class Vimeo:
     """
 
     def __init__(
-            self,
-            url: str,
-            embedded_on: Optional[str] = None,
-            cookies: Optional[str] = None,
+        self,
+        url: str,
+        embedded_on: Optional[str] = None,
+        cookies: Optional[str] = None,
     ):
-        self._url = url  # URL for the vimeo video
+        self._url = (
+            urlparse(url)._replace(query=None).geturl()
+        )  # URL for the vimeo video
         self._video_id = self._validate_url()  # Video ID at the end of the link
         self._headers = headers
         self._cookies = dict(cookies_are=cookies)
+        self._params = self._extract_query(url)
         if embedded_on:
             self._headers["Referer"] = embedded_on
+
+    def _extract_query(self, original_url):
+        return parse_qs(qs=urlparse(original_url).query)
 
     def _validate_url(self):
         """
         This validates if the URL is of Vimeo and returns the video ID
         """
 
+        # Remember, the regexes are matched in order
+
         accepted_pattern = [
             r"^https:\/\/player.vimeo.com\/video\/(\d+)$",
             r"^https:\/\/vimeo.com\/(\d+)$",
             r"^https://vimeo.com/groups/.+?/videos/(\d+)$",
-            r"^https://vimeo.com/manage/videos/(\d+)$"
+            r"^https://vimeo.com/manage/videos/(\d+)$",
+            r"^https://vimeo.com/(\d+)/[a-zA-Z0-9]+$",
+            r"^https://vimeo.com/channels/staffpicks/(\d+)$",
         ]
         for pattern in accepted_pattern:
             match = re.findall(pattern, self._url)
             if match:
                 return match[0]
         # If none of the patterns is matched exception is raised
-        raise URLNotSupported(
-            f"{self._url} is not supported. Make sure you don't include query parameters in the url"
-        )
+        raise URLNotSupported(f"{self._url} is not supported")
 
     def _extractor(self) -> dict:
         """
         Extracts the direct mp4 link for the vimeo video
         """
-        if self._cookies:
+        if self._cookies.get("cookies_are") is not None:
             js_url = requests.get(
                 config.format(self._video_id),
                 headers=self._headers,
                 cookies=self._cookies,
+                params=self._params,
             )
         else:
-            js_url = requests.get(config.format(self._video_id), headers=self._headers)
+            js_url = requests.get(
+                config.format(self._video_id),
+                headers=self._headers,
+                params=self._params,
+            )
 
         if not js_url.ok:
             if js_url.status_code == 403:
                 # If the response is forbidden it tries another way to fetch link
                 try:
-                    html = requests.get(self._url, headers=self._headers)
+                    html = requests.get(
+                        self._url, headers=self._headers, params=self._params
+                    )
                 except AttributeError:
-                    raise RequestError("403: If the video is embed only, also provide the embed URL "
-                                       "on which it is embedded, Vimeo(url=<vimeo_url>,embedded_on=<url>)")
+                    raise RequestError(
+                        "403: If the video is embed only, also provide the embed URL "
+                        "on which it is embedded, Vimeo(url=<vimeo_url>,embedded_on=<url>)"
+                    )
                 if html.ok:
                     try:
                         url = config.format(self._video_id).replace("/", r"\\/")
@@ -264,9 +282,15 @@ class Vimeo:
         Retrieves meta data for the video
         """
         if self._cookies:
-            video_info = requests.get(details.format(self._video_id), headers=self._headers, cookies=self._cookies)
+            video_info = requests.get(
+                details.format(self._video_id),
+                headers=self._headers,
+                cookies=self._cookies,
+            )
         else:
-            video_info = requests.get(details.format(self._video_id), headers=self._headers)
+            video_info = requests.get(
+                details.format(self._video_id), headers=self._headers
+            )
         if not video_info.ok:
             raise RequestError(
                 f"{video_info.status_code}: Unable to retrieve meta data."
@@ -318,17 +342,25 @@ class Vimeo:
             url = stream["url"]
             if not requests.get(url, stream=True).ok:
                 continue
-            stream_object = _Stream(quality=stream["quality"], direct_url=url, title=title)
+            stream_object = _Stream(
+                quality=stream["quality"], direct_url=url, title=title
+            )
             dl.append(stream_object)
         dl.sort()
         return dl
 
     @classmethod
-    def from_video_id(cls, video_id: str, embedded_on: Optional[str] = None, cookies: Optional[str] = None):
+    def from_video_id(
+        cls,
+        video_id: str,
+        embedded_on: Optional[str] = None,
+        cookies: Optional[str] = None,
+    ):
         self = cls.__new__(cls)
         self._video_id = video_id
         self._headers = headers
         self._cookies = dict(cookies_are=cookies)
+        self._params = {}
         if embedded_on:
             self._headers["Referer"] = embedded_on
         return self
